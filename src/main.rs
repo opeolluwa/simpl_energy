@@ -118,6 +118,26 @@ pub fn parse_json<T: de::DeserializeOwned>(file_path: &'static str) -> Result<T,
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
+
+    #[derive(Debug, Deserialize, Serialize, PartialEq)]
+    struct Profile {
+        name: String,
+        gender: String,
+        country: String,
+    }
+    // test the json_parser
+
+    #[test]
+    fn test_json_parser() {
+        let parsed_data = parse_json::<Profile>("test.json").ok();
+
+        let test_profile = Profile {
+            name: "adeoye adefemi".to_string(),
+            gender: "male".to_string(),
+            country: "nigeria".to_string(),
+        };
+        assert_eq!(Some(test_profile), parsed_data);
+    }
 }
