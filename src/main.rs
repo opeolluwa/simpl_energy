@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display, thread, time::Duration};
 
 use serde::{de, Deserialize, Serialize};
 
@@ -6,35 +6,77 @@ use serde::{de, Deserialize, Serialize};
 const BATTERY_ROUND_TRIP_EFFICIENCY: f64 = 0.9;
 
 // all units are in kW* or in kWh
-const MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID: u16 = 785;
-const BATTERY_MAXIMUM_CAPACITY: u16 = 500;
-const BATTERY_MAXIMUM_CHARGE_RATE: u16 = 400;
+const MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID: u32 = 785;
+const BATTERY_MAXIMUM_CAPACITY: u32 = 500;
+const BATTERY_MAXIMUM_CHARGE_RATE: u32 = 400;
+
+const FIFTEEN_MINUTES: Duration = Duration::from_secs(1 * 1);
 
 fn main() -> anyhow::Result<()> {
     let energy_forecast = parse_json::<EnergyForecast>("energy_consumption_profile.json")?;
 
     let electricity_prices = parse_json::<ElectricityPrices>("electricity_prices.json")?;
 
-    //  *  energy consumption updates every 15 minutes
-    //  * when it does, see if:
-    //  * 1. the state of the battery charge
-    //  * 2. the latest energy demand
-    //  *
-    //  * if the energy demand is greater than contractual limit, cut off the grid connection, then run on the battery, provided tha battery is charged
-    //  *
-    //  * if the energy demand is less, and the battery is not fully charged and the price is favorable, charge the battery
-    //  */
-    // loop {
-    // prices update every 1 hour
+    let mut current_hour = 0u32;
+    let mut interval_count = 0u8; // from zero to 4, representing 15 minutes division of an hour˝
 
-    // /**
 
-    println!("{} {}", energy_forecast, electricity_prices);
+    // track the energy prices every hour and update the current hour count
+    // energy usage are tracked every 15 minutes, of every hour,
+    // see the energy consumption
+    // see the battery level
+    // see if there is need for a recharge or battery usage
+    loop {
+        'energy_consumption: loop {
+            if current_hour == 5 && interval_count == 3 {
+                break 'energy_consumption;
+            } else if interval_count == 3 {
+                interval_count = 0;
+                current_hour += 1;
+            } else {
+                interval_count += 1;
+            }
+            println!(
+                "current hour={}, current_interval={}\n",
+                current_hour, interval_count
+            );
 
-    // }
-
-    Ok(())
+            thread::sleep(FIFTEEN_MINUTES);
+        }
+    }
 }
+
+// //  the HourlyInterval represent 15 minutes division of an hour
+// #[derive(PartialEq)]
+// enum HourlyInterval {
+//     FIRST = 0,  // 15 MINUTES
+//     SECOND = 1, // 30 MINUTES
+//     THIRD = 2,  // 45 MINUTES
+//     LAST = 3,   // 60 MINUTES
+// }
+
+// impl HourlyInterval {
+//     // Convert from u8 to the corresponding HourlyInterval variant
+//     fn from(value: u8) -> Self {
+//         match value {
+//             0 => Self::FIRST,
+//             1 => Self::SECOND,
+//             2 => Self::THIRD,
+//             3 => Self::LAST,
+//             _ => Self::FIRST, // Default to FIRST for out-of-range values
+//         }
+//     }
+
+//     // Return the corresponding u8 value of the HourlyInterval variant
+//     fn value(&self) -> u8 {
+//         match self {
+//             Self::FIRST => 0,
+//             Self::SECOND => 1,
+//             Self::THIRD => 2,
+//             Self::LAST => 3,
+//         }
+//     }
+// }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EnergyForecast {
@@ -117,6 +159,24 @@ pub fn parse_json<T: de::DeserializeOwned>(file_path: &'static str) -> Result<T,
     Ok(parsed_data)
 }
 
+// optimize the power
+fn optimize_energy_usage(
+    _current_price_per_kwh: f64,
+    current_average_power_consumption: f64,
+    current_battery_capacity: u32,
+) {
+    // if the current energy demand is beyond the volume the grid is supposed to supply
+
+    if current_average_power_consumption > MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID as f64 {
+        println!("consider using battery if not  low")
+    }
+
+    if current_average_power_consumption < MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID as f64
+        && current_battery_capacity < BATTERY_MAXIMUM_CAPACITY
+    {
+        println!("consider charging the battery now ")
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
