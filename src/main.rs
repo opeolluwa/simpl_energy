@@ -20,19 +20,21 @@ fn main() -> anyhow::Result<()> {
     let mut current_hour = 0u32;
     let mut interval_count = 0u8; // from zero to 4, representing 15 minutes division of an hour˝
 
-
     // track the energy prices every hour and update the current hour count
     // energy usage are tracked every 15 minutes, of every hour,
     // see the energy consumption
     // see the battery level
     // see if there is need for a recharge or battery usage
-    loop {
+    'energy_price: loop {
+        let mut current_price_per_kwh = &electricity_prices.prices[0];
+
         'energy_consumption: loop {
             if current_hour == 5 && interval_count == 3 {
                 break 'energy_consumption;
             } else if interval_count == 3 {
                 interval_count = 0;
                 current_hour += 1;
+                current_price_per_kwh = &electricity_prices.prices[1]
             } else {
                 interval_count += 1;
             }
@@ -41,42 +43,12 @@ fn main() -> anyhow::Result<()> {
                 current_hour, interval_count
             );
 
+            optimize_energy_usage(current_price_per_kwh, 5.6, 35);
+
             thread::sleep(FIFTEEN_MINUTES);
         }
     }
 }
-
-// //  the HourlyInterval represent 15 minutes division of an hour
-// #[derive(PartialEq)]
-// enum HourlyInterval {
-//     FIRST = 0,  // 15 MINUTES
-//     SECOND = 1, // 30 MINUTES
-//     THIRD = 2,  // 45 MINUTES
-//     LAST = 3,   // 60 MINUTES
-// }
-
-// impl HourlyInterval {
-//     // Convert from u8 to the corresponding HourlyInterval variant
-//     fn from(value: u8) -> Self {
-//         match value {
-//             0 => Self::FIRST,
-//             1 => Self::SECOND,
-//             2 => Self::THIRD,
-//             3 => Self::LAST,
-//             _ => Self::FIRST, // Default to FIRST for out-of-range values
-//         }
-//     }
-
-//     // Return the corresponding u8 value of the HourlyInterval variant
-//     fn value(&self) -> u8 {
-//         match self {
-//             Self::FIRST => 0,
-//             Self::SECOND => 1,
-//             Self::THIRD => 2,
-//             Self::LAST => 3,
-//         }
-//     }
-// }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct EnergyForecast {
@@ -161,7 +133,7 @@ pub fn parse_json<T: de::DeserializeOwned>(file_path: &'static str) -> Result<T,
 
 // optimize the power
 fn optimize_energy_usage(
-    _current_price_per_kwh: f64,
+    current_price_per_kwh: &EnergyData,
     current_average_power_consumption: f64,
     current_battery_capacity: u32,
 ) {
