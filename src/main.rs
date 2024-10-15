@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, str::FromStr};
+use std::{collections::HashMap, fmt::Display, str::FromStr, time::Duration};
 
 use chrono::{DateTime, FixedOffset, Timelike};
 use serde::{de, Deserialize, Serialize};
@@ -29,67 +29,83 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let optimal_electricity_usage_plan = OptimizationPlan::new();
+    let mut optimal_electricity_usage_plan = OptimizationPlan::new();
 
-    // go over the energy consumption profile and tell the energy demand
-    // the electricity demand changes/is updated every 15 minutes, that's 4 times in an hour
-    // the electricity prices is updated every hour
-    for profile in energy_consumption_profile.forecasts.into_iter() {
-        let current_hour: u32 = chrono::DateTime::<FixedOffset>::from_str(&profile.end)?.hour();
+    // there are 24 hours, 0 - 23
+    // for each of these hours. there are 4 divisions, each of 15 minutes
+    // for each division there is a energy requirement
 
-        let energy_demand = profile.consumption_average_power_interval / 1000.0f64; // convert to kilowatt
+    for hour in 0..=23 {
+        // the electricity price for this hour
+        let current_electricity_price = electricity_price_per_hour.get(&hour).unwrap();
 
-        let current_battery_capacity: f64 = 0.5 * BATTERY_MAXIMUM_CAPACITY; // the battery is at 505 at the start of the day
+        let current_hour: u32 = hour;
 
-        // if the energy demand is greater, just use the battery, don't bother to check the prices, check if the battery is currently charged
-        if energy_demand > MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID {
-            // check the battery capacity
-            // get the remainder left,
-            // get the duration the battery will be used to run the load
+        let mut current_battery_capacity: f64 = 0.5 * BATTERY_MAXIMUM_CAPACITY; // the battery is at 50% at the start of the day
+
+        let energy_demand_for_current_hour: Vec<EnergyConsumptionProfile> =
+            energy_consumption_profile
+                .forecasts
+                .iter()
+                .filter(|profile| {
+                    chrono::DateTime::<FixedOffset>::from_str(&profile.start)
+                        .unwrap()
+                        .hour()
+                        == current_hour
+                        || chrono::DateTime::<FixedOffset>::from_str(&profile.end)
+                            .unwrap()
+                            .hour()
+                            == current_hour
+                })
+                .map(|profile| EnergyConsumptionProfile {
+                    consumption_average_power_interval: profile.consumption_average_power_interval
+                        / 1000.0f64, // energy demand is not in kw
+                    start: profile.start.clone(),
+                    end: profile.end.clone(),
+                })
+                .collect();
+
+        // println!("// energy demand {:#?}", energy_demand_for_current_hour);
+
+        // gp over the 15 minutes division for the current energy demand for the hour and apply the optimization rule
+        for demand in energy_demand_for_current_hour.into_iter() {
+            let energy_demand = demand.consumption_average_power_interval;
+
+            // if the energy demand is greater, just use the battery, don't bother to check the prices, check if the battery is currently charged
+
+            let energy_demand_has_overflow =
+                energy_demand > MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID;
+
             let overflow = energy_demand - MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID;
 
-            // fail safe, abort if the battery cannot run the load
-            if overflow > current_battery_capacity {
-                // TODO: handle the edge case here
-                std::process::exit(1);
-            } else {
-                let power_drawn_from_battery = overflow;
-                let time_taken_to_manage_excess =
-                    BATTERY_MAXIMUM_CAPACITY / power_drawn_from_battery;
-
-                //todo: factor in the 15minutes constraint
-                // println!(
-                //     "time taken {} power drawn {}",
-                //     time_taken_to_manage_excess, power_drawn_from_battery
-                // );
-
-                //TODO: optimal_electricity_usage_plan.extend_plan_with();
-            }
-            // println!(" the overflow is {}", overflow);
-        } else {
-            // get the current price, be sure it is lower or equal to the average subscription rate, charged the battery and track how much kw is fed into it
-            let current_electricity_price = electricity_price_per_hour.get(&current_hour).unwrap();
-
-            let cost_is_high: bool =
-                current_electricity_price > &AVERAGE_ELECTRICITY_PRICE_PER_EURO;
+            let high_tariff: bool = current_electricity_price > &AVERAGE_ELECTRICITY_PRICE_PER_EURO;
 
             let battery_is_full = current_battery_capacity == BATTERY_MAXIMUM_CAPACITY;
 
-            if cost_is_high {
-                // println!("the cost is too high ")
-            } else if battery_is_full {
-                // println!("battery is full")
-            } else if cost_is_high && !battery_is_full {
-                // println!("a very high cost is detected and battery isn't full")
-            } else {
-                // battery is not full and cost is not high
-                // println!("consider charging the battery");
-                //TODO: optimal_electricity_usage_plan.extend_plan_with();
+            if energy_demand_has_overflow && overflow > current_battery_capacity {
+                eprintln!("Error: Battery cannot handle the current load overflow.");
+                std::process::exit(1);
+            } else if energy_demand_has_overflow && overflow < current_battery_capacity {
+                let time_spent_to_handle_the_excess_in_hrs = BATTERY_MAXIMUM_CAPACITY/overflow;
+
+                let battery_usage_duration_in_secs = time_spent_to_handle_the_excess_in_hrs as u64; //TODO: use standard conversion;
+                current_battery_capacity = current_battery_capacity - overflow;
+                
+                let battery_usage_plan  = BatteryUsagePlan::new(Some(overflow), None, &demand.start,  battery_usage_duration_in_secs);
+
+                optimal_electricity_usage_plan.extend_plan_with(battery_usage_plan);
+                // run the load on the battery and calculate time needed
+            } else if !energy_demand_has_overflow && high_tariff {
+                // high cost, skipping charging battery
+            } else if !high_tariff && !battery_is_full {
+                // charge the battery
             }
         }
-    }
 
-    println!("{:?}", optimal_electricity_usage_plan);
+        // let energy_demand = 0f64;
+    }
+    println!("hehehe{:?}", optimal_electricity_usage_plan);
+
     Ok(())
 }
 
@@ -142,12 +158,14 @@ impl BatteryUsagePlan {
     fn new(
         energy_drawn_from_battery: Option<f64>,
         energy_fed_into_battery: Option<f64>,
-        // start: &DateTime<>,
-        duration: u32, // the time taken in minutes
+        start: &str,
+        duration: u64, // the time taken in minutes
     ) -> Self {
+        let start = chrono::DateTime::<FixedOffset>::from_str(start).unwrap();
+        let end = start + Duration::from_secs(60);
         Self {
-            start: todo!(),
-            end: todo!(), // the start  time+ duration
+            start,
+            end, // the start  time+ duration
             energy_from_battery_wh: energy_drawn_from_battery,
             energy_to_battery_wh: energy_fed_into_battery,
         }
@@ -237,6 +255,8 @@ pub fn parse_json<T: de::DeserializeOwned>(file_path: &'static str) -> Result<T,
     Ok(parsed_data)
 }
 
+/// optimize the electricity price }
+fn optimize_electricity_useage() {}
 #[cfg(test)]
 mod tests {
     use super::*;
