@@ -4,13 +4,13 @@ use chrono::{DateTime, FixedOffset, Timelike};
 use serde::{de, Deserialize, Serialize};
 
 // 90 percent of the current battery capacity
-const BATTERY_ROUND_TRIP_EFFICIENCY: f64 = 0.9;
+const _BATTERY_ROUND_TRIP_EFFICIENCY: f64 = 0.9;
 const AVERAGE_ELECTRICITY_PRICE_PER_EURO: f64 = 0.43;
 
 // all units are in kW* or in kWh
 const MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID: f64 = 7850.0;
 const BATTERY_MAXIMUM_CAPACITY: f64 = 500.0;
-const BATTERY_MAXIMUM_CHARGE_RATE: f64 = 400.0;
+const _BATTERY_MAXIMUM_CHARGE_RATE: f64 = 400.0;
 
 fn main() -> anyhow::Result<()> {
     let energy_consumption_profile =
@@ -29,11 +29,166 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let mut optimal_electricity_usage_plan = OptimizationPlan::new();
+    let optimal_electricity_usage_plan =
+        optimize_electricity_usage(electricity_price_per_hour, &energy_consumption_profile);
 
-    // there are 24 hours, 0 - 23
-    // for each of these hours. there are 4 divisions, each of 15 minutes
-    // for each division there is a energy requirement
+    println!("{:#?}", optimal_electricity_usage_plan);
+
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct EnergyConsumptionForecast {
+    forecasts: Vec<EnergyConsumptionProfile>,
+}
+
+impl Display for EnergyConsumptionForecast {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "forecasts:")?;
+
+        for profile in <Vec<EnergyConsumptionProfile> as Clone>::clone(&self.forecasts).into_iter()
+        {
+            writeln!(f, "{:#?}", profile)?
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct EnergyConsumptionProfile {
+    start: String,
+    end: String,
+    consumption_average_power_interval: f64,
+}
+
+impl Display for EnergyConsumptionProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "start: {}\nend: {}\n consumption_average_power_interval:{}",
+            self.start, self.end, self.consumption_average_power_interval
+        )
+    }
+}
+/// the BatteryUsagePlan states how much energy should be drawn from the battery
+#[derive(Debug, Clone)]
+pub struct BatteryUsagePlan {
+    /// the time (in ISO format) when usage or recharge starts
+    start: DateTime<FixedOffset>,
+    /// the time (in ISO format) when usage or recharge ends
+    end: DateTime<FixedOffset>,
+    energy_from_battery_wh: Option<f64>,
+    energy_to_battery_wh: Option<f64>,
+}
+
+impl BatteryUsagePlan {
+    fn new(
+        energy_drawn_from_battery: Option<f64>,
+        energy_fed_into_battery: Option<f64>,
+        start: &str,
+        duration: u64, // the time taken in minutes
+    ) -> Self {
+        let start = chrono::DateTime::<FixedOffset>::from_str(start).unwrap();
+        let end = start + Duration::from_secs(duration);
+        Self {
+            start,
+            end, // the start  time+ duration
+            energy_from_battery_wh: energy_drawn_from_battery,
+            energy_to_battery_wh: energy_fed_into_battery,
+        }
+    }
+}
+
+impl Display for BatteryUsagePlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "start:{:#?},\nend:{:#?},\nenergy_from_battery_wh:{:#?},energy_to_battery_wh:{:#?}",
+            self.start, self.end, self.energy_from_battery_wh, self.energy_to_battery_wh
+        )
+    }
+}
+
+/// store the battery usage plan  
+#[derive(Debug)]
+struct OptimizationPlan {
+    planning: Vec<BatteryUsagePlan>,
+}
+
+impl OptimizationPlan {
+    fn new() -> Self {
+        Self {
+            planning: Vec::<BatteryUsagePlan>::new(),
+        }
+    }
+    fn extend_plan_with(&mut self, plan: BatteryUsagePlan) {
+        self.planning.push(plan);
+    }
+}
+
+// impl Display for OptimizationPlan {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         write!(f, "planning:",)?;
+//         for plan in <Vec<BatteryUsagePlan> as Clone>::clone(&self.planning).into_iter() {
+//             println!("{:#?}", plan)
+//         }
+
+//         Ok(())
+//     }
+// }
+#[derive(Debug, Deserialize, Serialize)]
+struct ElectricityPrices {
+    bidding_zone: String,
+    prices: Vec<ElectricityPricePerHour>,
+}
+
+impl Display for ElectricityPrices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "bidding_zone: {}\nprices: ", self.bidding_zone)?;
+
+        for price in <Vec<ElectricityPricePerHour> as Clone>::clone(&self.prices).into_iter() {
+            writeln!(f, "{:#?}", price)?
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Deserialize, Serialize, Clone)]
+struct ElectricityPricePerHour {
+    start: String,
+    end: String,
+    market_price_currency: String,
+    market_price_per_kwh: f64,
+}
+
+impl Display for ElectricityPricePerHour {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Start: {}\nEnd: {}\nMarket Price: {}\n{:.4} per kWh",
+            self.start, self.end, self.market_price_currency, self.market_price_per_kwh
+        )
+    }
+}
+
+/// import the provided json and  parse to structs
+pub fn parse_json<T: de::DeserializeOwned>(file_path: &'static str) -> Result<T, anyhow::Error> where
+{
+    let file_path = std::path::Path::new(file_path);
+
+    let data = std::fs::read_to_string(file_path)?;
+
+    let parsed_data: T = serde_json::from_str(&data)?;
+
+    Ok(parsed_data)
+}
+
+/// optimize the electricity price }
+fn optimize_electricity_usage(
+    electricity_price_per_hour: HashMap<u32, f64>,
+    energy_consumption_profile: &EnergyConsumptionForecast,
+) -> OptimizationPlan {
+    let mut optimal_electricity_usage_plan = OptimizationPlan::new();
 
     for hour in 0..=23 {
         // the electricity price for this hour
@@ -86,177 +241,46 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("Error: Battery cannot handle the current load overflow.");
                 std::process::exit(1);
             } else if energy_demand_has_overflow && overflow < current_battery_capacity {
-                let time_spent_to_handle_the_excess_in_hrs = BATTERY_MAXIMUM_CAPACITY/overflow;
+                let time_spent_to_handle_the_excess_in_hrs = BATTERY_MAXIMUM_CAPACITY / overflow;
 
                 let battery_usage_duration_in_secs = time_spent_to_handle_the_excess_in_hrs as u64; //TODO: use standard conversion;
-                current_battery_capacity = current_battery_capacity - overflow;
-                
-                let battery_usage_plan  = BatteryUsagePlan::new(Some(overflow), None, &demand.start,  battery_usage_duration_in_secs);
+                current_battery_capacity -= overflow;
+
+                let battery_usage_plan = BatteryUsagePlan::new(
+                    Some(overflow),
+                    None,
+                    &demand.start,
+                    battery_usage_duration_in_secs,
+                );
 
                 optimal_electricity_usage_plan.extend_plan_with(battery_usage_plan);
                 // run the load on the battery and calculate time needed
             } else if !energy_demand_has_overflow && high_tariff {
+                eprintln!("Error: A vry high price can't charge the battery now ");
                 // high cost, skipping charging battery
             } else if !high_tariff && !battery_is_full {
                 // charge the battery
+                let time_spent_to_charge_the_battery_hrs = BATTERY_MAXIMUM_CAPACITY / overflow;
+
+                let battery_usage_duration_in_secs = time_spent_to_charge_the_battery_hrs as u64; //TODO: use standard conversion;
+                current_battery_capacity -= overflow;
+
+                let battery_usage_plan = BatteryUsagePlan::new(
+                    Some(overflow),
+                    None,
+                    &demand.start,
+                    battery_usage_duration_in_secs,
+                );
+
+                optimal_electricity_usage_plan.extend_plan_with(battery_usage_plan);
             }
         }
 
         // let energy_demand = 0f64;
+        // println!("hehehe{:#?}", optimal_electricity_usage_plan);
     }
-    println!("hehehe{:?}", optimal_electricity_usage_plan);
-
-    Ok(())
+    optimal_electricity_usage_plan
 }
-
-#[derive(Debug, Serialize, Deserialize)]
-struct EnergyConsumptionForecast {
-    forecasts: Vec<EnergyConsumptionProfile>,
-}
-
-impl Display for EnergyConsumptionForecast {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "forecasts:\n")?;
-
-        for profile in <Vec<EnergyConsumptionProfile> as Clone>::clone(&self.forecasts).into_iter()
-        {
-            println!("{:#?}", profile)
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct EnergyConsumptionProfile {
-    start: String,
-    end: String,
-    consumption_average_power_interval: f64,
-}
-
-impl Display for EnergyConsumptionProfile {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "start: {}\nend: {}\n consumption_average_power_interval:{}",
-            self.start, self.end, self.consumption_average_power_interval
-        )
-    }
-}
-/// the BatteryUsagePlan states how much energy should be drawn from the battery
-#[derive(Debug, Clone)]
-pub struct BatteryUsagePlan {
-    /// the time (in ISO format) when usage or recharge starts
-    start: DateTime<FixedOffset>,
-    /// the time (in ISO format) when usage or recharge ends
-    end: DateTime<FixedOffset>,
-    energy_from_battery_wh: Option<f64>,
-    energy_to_battery_wh: Option<f64>,
-}
-
-impl BatteryUsagePlan {
-    fn new(
-        energy_drawn_from_battery: Option<f64>,
-        energy_fed_into_battery: Option<f64>,
-        start: &str,
-        duration: u64, // the time taken in minutes
-    ) -> Self {
-        let start = chrono::DateTime::<FixedOffset>::from_str(start).unwrap();
-        let end = start + Duration::from_secs(60);
-        Self {
-            start,
-            end, // the start  time+ duration
-            energy_from_battery_wh: energy_drawn_from_battery,
-            energy_to_battery_wh: energy_fed_into_battery,
-        }
-    }
-}
-
-impl Display for BatteryUsagePlan {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "start:{:#?},\nend:{:#?},\nenergy_from_battery_wh:{:#?},energy_to_battery_wh:{:#?}",
-            self.start, self.end, self.energy_from_battery_wh, self.energy_to_battery_wh
-        )
-    }
-}
-
-/// store the battery usage plan  
-#[derive(Debug)]
-struct OptimizationPlan {
-    planning: Vec<BatteryUsagePlan>,
-}
-
-impl OptimizationPlan {
-    fn new() -> Self {
-        Self {
-            planning: Vec::<BatteryUsagePlan>::new(),
-        }
-    }
-    fn extend_plan_with(&mut self, plan: BatteryUsagePlan) {
-        self.planning.push(plan);
-    }
-}
-
-impl Display for OptimizationPlan {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "planning:",)?;
-        for plan in <Vec<BatteryUsagePlan> as Clone>::clone(&self.planning).into_iter() {
-            println!("{:#?}", plan)
-        }
-
-        Ok(())
-    }
-}
-#[derive(Debug, Deserialize, Serialize)]
-struct ElectricityPrices {
-    bidding_zone: String,
-    prices: Vec<ElectricityPricePerHour>,
-}
-
-impl Display for ElectricityPrices {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "bidding_zone: {}\nprices: ", self.bidding_zone)?;
-
-        for price in <Vec<ElectricityPricePerHour> as Clone>::clone(&self.prices).into_iter() {
-            println!("{:#?}\n", price)
-        }
-        Ok(())
-    }
-}
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct ElectricityPricePerHour {
-    start: String,
-    end: String,
-    market_price_currency: String,
-    market_price_per_kwh: f64,
-}
-
-impl Display for ElectricityPricePerHour {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Start: {}\nEnd: {}\nMarket Price: {}\n{:.4} per kWh",
-            self.start, self.end, self.market_price_currency, self.market_price_per_kwh
-        )
-    }
-}
-
-/// import the provided json and  parse to structs
-pub fn parse_json<T: de::DeserializeOwned>(file_path: &'static str) -> Result<T, anyhow::Error> where
-{
-    let file_path = std::path::Path::new(file_path);
-
-    let data = std::fs::read_to_string(file_path)?;
-
-    let parsed_data: T = serde_json::from_str(&data)?;
-
-    Ok(parsed_data)
-}
-
-/// optimize the electricity price }
-fn optimize_electricity_useage() {}
 #[cfg(test)]
 mod tests {
     use super::*;
