@@ -1,61 +1,76 @@
-use std::{fmt::Display, thread, time::Duration};
+use std::{fmt::Display, str::FromStr};
 
+use chrono::{DateTime, FixedOffset, Timelike};
 use serde::{de, Deserialize, Serialize};
 
 // 90 percent of the current battery capacity
 const BATTERY_ROUND_TRIP_EFFICIENCY: f64 = 0.9;
 
 // all units are in kW* or in kWh
-const MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID: u32 = 785;
+const MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID: u32 = 7850;
 const BATTERY_MAXIMUM_CAPACITY: u32 = 500;
 const BATTERY_MAXIMUM_CHARGE_RATE: u32 = 400;
 
-const FIFTEEN_MINUTES: Duration = Duration::from_secs(1 * 1);
-
 fn main() -> anyhow::Result<()> {
-    let energy_forecast = parse_json::<EnergyForecast>("energy_consumption_profile.json")?;
+    let energy_consumption_profile =
+        parse_json::<EnergyConsumptionForecast>("energy_consumption_profile.json")?;
 
     let electricity_prices = parse_json::<ElectricityPrices>("electricity_prices.json")?;
 
-    let mut current_hour = 0u32;
-    let mut interval_count = 0u8; // from zero to 4, representing 15 minutes division of an hour˝
+    let usage_plan = OptimizationPlan::new();
 
-    // track the energy prices every hour and update the current hour count
-    // energy usage are tracked every 15 minutes, of every hour,
-    // see the energy consumption
-    // see the battery level
-    // see if there is need for a recharge or battery usage
-    'energy_price: loop {
-        let mut current_price_per_kwh = &electricity_prices.prices[0];
+    // go over the energy consumption profile and tell us the energy demand
+    for profile in energy_consumption_profile.forecasts.into_iter() {
+        let energy_demand = profile.consumption_average_power_interval / 1000.0f64; // convert to kilowatt
 
-        'energy_consumption: loop {
-            if current_hour == 5 && interval_count == 3 {
-                break 'energy_consumption;
-            } else if interval_count == 3 {
-                interval_count = 0;
-                current_hour += 1;
-                current_price_per_kwh = &electricity_prices.prices[1]
+        let current_hour: u32 = chrono::DateTime::<FixedOffset>::from_str(&profile.end)?.hour();
+        let current_battery_capacity: f64 = 0.5 * BATTERY_MAXIMUM_CAPACITY as f64;
+
+        // if the energy demand is greater, just use the battery, don't bother to check the prices, check if the battery is currently charged
+        if energy_demand > MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID as f64 {
+            // check the battery capacity
+            // get the remainder left,
+            // get the duration the battery will be used to run the load
+            let overflow = energy_demand - MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID as f64;
+
+            // fail safe, abort if the battery cannot run the load
+            if overflow > current_battery_capacity {
+                println!("Energy demand is overly large, aborting ...");
+                println!(
+                    "Energy demand: {} Battery Capacity: {}",
+                    overflow, current_battery_capacity
+                );
+                std::process::exit(1);
             } else {
-                interval_count += 1;
+                let power_drawn_from_battery = overflow;
+                let time_taken_to_manage_excess =
+                    BATTERY_MAXIMUM_CAPACITY as f64 / power_drawn_from_battery;
+                println!(
+                    "time taken {} power drawn {}",
+                    time_taken_to_manage_excess, power_drawn_from_battery
+                );
+
+                //TODO: usage_plan.extend_plan_with();
             }
-            println!(
-                "current hour={}, current_interval={}\n",
-                current_hour, interval_count
-            );
-
-            optimize_energy_usage(current_price_per_kwh, 5.6, 35);
-
-            thread::sleep(FIFTEEN_MINUTES);
+            println!(" the overflow is {}", overflow);
+        } else {
+            // for
+            // get the current price, be sure it is lover or equal to the average subscription, charged the battery and track how much juice ios into it
+            // println!("consider charging the battery")
+            //TODO: usage_plan.extend_plan_with();
         }
     }
+
+    println!("{:?}", usage_plan);
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct EnergyForecast {
+struct EnergyConsumptionForecast {
     forecasts: Vec<EnergyConsumptionProfile>,
 }
 
-impl Display for EnergyForecast {
+impl Display for EnergyConsumptionForecast {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "forecasts:\n")?;
 
@@ -84,32 +99,95 @@ impl Display for EnergyConsumptionProfile {
         )
     }
 }
+/// the BatteryUsagePlan states how much energy should be drawn from the battery
+#[derive(Debug, Clone)]
+pub struct BatteryUsagePlan {
+    /// the time (in ISO format) when usage or recharge starts
+    start: DateTime<FixedOffset>,
+    /// the time (in ISO format) when usage or recharge ends
+    end: DateTime<FixedOffset>,
+    energy_from_battery_wh: Option<f64>,
+    energy_to_battery_wh: Option<f64>,
+}
 
+impl BatteryUsagePlan {
+    fn new(
+        energy_drawn_from_battery: Option<f64>,
+        energy_fed_into_battery: Option<f64>,
+        // start: &DateTime<>,
+        duration: u32, // the time taken in minutes
+    ) -> Self {
+        Self {
+            start: todo!(),
+            end: todo!(), // the start  time+ duration
+            energy_from_battery_wh: energy_drawn_from_battery,
+            energy_to_battery_wh: energy_fed_into_battery,
+        }
+    }
+}
+
+impl Display for BatteryUsagePlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "start:{:#?},\nend:{:#?},\nenergy_from_battery_wh:{:#?},energy_to_battery_wh:{:#?}",
+            self.start, self.end, self.energy_from_battery_wh, self.energy_to_battery_wh
+        )
+    }
+}
+
+/// store the battery usage plan  
+#[derive(Debug)]
+struct OptimizationPlan {
+    planning: Vec<BatteryUsagePlan>,
+}
+
+impl OptimizationPlan {
+    fn new() -> Self {
+        Self {
+            planning: Vec::<BatteryUsagePlan>::new(),
+        }
+    }
+    fn extend_plan_with(&mut self, plan: BatteryUsagePlan) {
+        self.planning.push(plan);
+    }
+}
+
+impl Display for OptimizationPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "planning:",)?;
+        for plan in <Vec<BatteryUsagePlan> as Clone>::clone(&self.planning).into_iter() {
+            println!("{:#?}", plan)
+        }
+
+        Ok(())
+    }
+}
 #[derive(Debug, Deserialize, Serialize)]
 struct ElectricityPrices {
     bidding_zone: String,
-    prices: Vec<EnergyData>,
+    prices: Vec<ElectricityPricePerHour>,
 }
 
 impl Display for ElectricityPrices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "bidding_zone: {}\nprices: ", self.bidding_zone)?;
 
-        for price in <Vec<EnergyData> as Clone>::clone(&self.prices).into_iter() {
+        for price in <Vec<ElectricityPricePerHour> as Clone>::clone(&self.prices).into_iter() {
             println!("{:#?}\n", price)
         }
         Ok(())
     }
 }
 #[derive(Debug, Deserialize, Serialize, Clone)]
-struct EnergyData {
+struct ElectricityPricePerHour {
     start: String,
     end: String,
     market_price_currency: String,
     market_price_per_kwh: f64,
 }
 
-impl Display for EnergyData {
+impl Display for ElectricityPricePerHour {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -119,7 +197,7 @@ impl Display for EnergyData {
     }
 }
 
-/// import the provided json and  parse to text
+/// import the provided json and  parse to structs
 pub fn parse_json<T: de::DeserializeOwned>(file_path: &'static str) -> Result<T, anyhow::Error> where
 {
     let file_path = std::path::Path::new(file_path);
@@ -131,24 +209,6 @@ pub fn parse_json<T: de::DeserializeOwned>(file_path: &'static str) -> Result<T,
     Ok(parsed_data)
 }
 
-// optimize the power
-fn optimize_energy_usage(
-    current_price_per_kwh: &EnergyData,
-    current_average_power_consumption: f64,
-    current_battery_capacity: u32,
-) {
-    // if the current energy demand is beyond the volume the grid is supposed to supply
-
-    if current_average_power_consumption > MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID as f64 {
-        println!("consider using battery if not  low")
-    }
-
-    if current_average_power_consumption < MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID as f64
-        && current_battery_capacity < BATTERY_MAXIMUM_CAPACITY
-    {
-        println!("consider charging the battery now ")
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
