@@ -1,14 +1,15 @@
 use battery_usage_plan::BatteryUsagePlan;
 use chrono::{FixedOffset, Timelike};
-use pkg::{
-     ElectricityPrices, EnergyConsumption, EnergyConsumptionForecast,
-    OptimizationPlan,
-};
+use energy_consumption::{EnergyConsumption, EnergyConsumptionForecast};
+use optimization_plan::OptimizationPlan;
+use electricity_prices::ElectricityPrices;
 use serde::de;
 use std::{collections::HashMap, str::FromStr};
 
-mod pkg;
 mod battery_usage_plan;
+mod energy_consumption;
+mod optimization_plan;
+mod electricity_prices;
 
 // 90 percent of the current battery capacity
 const _BATTERY_ROUND_TRIP_EFFICIENCY: f64 = 0.9;
@@ -24,18 +25,17 @@ fn main() -> anyhow::Result<()> {
 
     for hour in 0..=23 {
         let current_hour = hour;
-       let current_electricity_price = get_electricity_price_for_an_hour(&hour).unwrap();
+        let current_electricity_price = get_electricity_price_for_an_hour(&hour).unwrap();
 
-        let mut current_battery_capacity: f64 = 0.5 * BATTERY_MAXIMUM_CAPACITY; // the battery is at 50% at the start of the day
+         // the battery is at 50% at the start of the day
+        let mut current_battery_capacity: f64 = 0.5 * BATTERY_MAXIMUM_CAPACITY;
 
         let energy_demand_for_current_hour = get_electricity_demand_for_an_hour(current_hour);
 
-          // go over the 15 minutes division for the current energy demand for the hour and apply the optimization rule
+        // go over the 15 minutes division for the current energy demand for the hour and apply the optimization rule
         for demand in energy_demand_for_current_hour.into_iter() {
             let energy_demand = demand.consumption_average_power_interval;
 
-         
-            // if the energy demand is greater, just use the battery, don't bother to check the prices, check if the battery is currently charged
 
             let energy_demand_has_overflow =
                 energy_demand > MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID;
@@ -85,7 +85,6 @@ fn main() -> anyhow::Result<()> {
                 optimal_electricity_usage_plan.extend_plan_with(battery_usage_plan);
             }
         }
-
     }
 
     println!("{:#?}", optimal_electricity_usage_plan);
@@ -123,7 +122,6 @@ fn get_electricity_price_for_an_hour(hour: &u32) -> Option<f64> {
     electricity_price_per_hour.get(hour).copied()
 }
 
-
 fn get_electricity_demand_for_an_hour(current_hour: u32) -> Vec<EnergyConsumption> {
     let energy_demand =
         parse_json::<EnergyConsumptionForecast>("energy_consumption_profile.json").unwrap();
@@ -136,7 +134,6 @@ fn get_electricity_demand_for_an_hour(current_hour: u32) -> Vec<EnergyConsumptio
                 .unwrap()
                 .hour()
                 == current_hour
-
         })
         .map(|profile| EnergyConsumption {
             consumption_average_power_interval: profile.consumption_average_power_interval
