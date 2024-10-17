@@ -1,7 +1,9 @@
 [package]
-name = "simpl_energy"
+name = "simpl_energy_assessment"
 version = "0.1.0"
 edition = "2021"
+authors = ["adeoye adefemi"]
+description = "Simpl Energy software engineering techical assessment"
 
 [dependencies]
 anyhow = "1.0.89"

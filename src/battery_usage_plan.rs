@@ -1,18 +1,16 @@
-use std::{fmt::Display, time::Duration};
-
 use chrono::{DateTime, FixedOffset};
 
-use std::str::FromStr;
+use std::{fmt::Display, str::FromStr};
 
-/// the BatteryUsagePlan states how much energy should be drawn from the battery
+/// the BatteryUsagePlan states how much energy should be drawn from the battery or added to it
 #[derive(Debug, Clone)]
 pub struct BatteryUsagePlan {
     /// the time (in ISO format) when usage or recharge starts
     pub start: DateTime<FixedOffset>,
     /// the time (in ISO format) when usage or recharge ends
     pub end: DateTime<FixedOffset>,
-    pub energy_from_battery_wh: Option<f64>,
-    pub energy_to_battery_wh: Option<f64>,
+    pub energy_from_battery_wh: f64,
+    pub energy_to_battery_wh: f64,
 }
 
 impl BatteryUsagePlan {
@@ -20,15 +18,15 @@ impl BatteryUsagePlan {
         energy_drawn_from_battery: Option<f64>,
         energy_fed_into_battery: Option<f64>,
         start: &str,
-        duration: u64, // the time taken in minutes
+        end: &str,
     ) -> Self {
         let start = DateTime::<FixedOffset>::from_str(start).unwrap();
-        let end = start + Duration::from_secs(duration);
+        let end = DateTime::<FixedOffset>::from_str(end).unwrap();
         Self {
             start,
-            end, // the start  time+ duration
-            energy_from_battery_wh: energy_drawn_from_battery,
-            energy_to_battery_wh: energy_fed_into_battery,
+            end, // the start  time+ duration of use or charge
+            energy_from_battery_wh: energy_drawn_from_battery.unwrap_or(0.0f64),
+            energy_to_battery_wh: energy_fed_into_battery.unwrap_or(0.0f64),
         }
     }
 }

@@ -1,24 +1,24 @@
 use battery_usage_plan::BatteryUsagePlan;
 use chrono::{FixedOffset, Timelike};
+use electricity_prices::ElectricityPrices;
 use energy_consumption::{EnergyConsumption, EnergyConsumptionForecast};
 use optimization_plan::OptimizationPlan;
-use electricity_prices::ElectricityPrices;
 use serde::de;
 use std::{collections::HashMap, str::FromStr};
 
 mod battery_usage_plan;
+mod electricity_prices;
 mod energy_consumption;
 mod optimization_plan;
-mod electricity_prices;
 
 // 90 percent of the current battery capacity
-const _BATTERY_ROUND_TRIP_EFFICIENCY: f64 = 0.9;
-const AVERAGE_ELECTRICITY_PRICE_PER_EURO: f64 = 0.43;
+const _BATTERY_ROUND_TRIP_EFFICIENCY_IN: f64 = 0.9;
+const AVERAGE_ELECTRICITY_PRICE_IN_EURO: f64 = 0.43;
 
 // all units are in kW* or in kWh
-const MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID: f64 = 7850.0;
-const BATTERY_MAXIMUM_CAPACITY: f64 = 500.0;
-const _BATTERY_MAXIMUM_CHARGE_RATE: f64 = 400.0;
+const ENERGY_CONTRACTUAL_LIMIT_FROM_GRID: f64 = 7850.0;
+const BATTERY_CAPACITY: f64 = 500.0;
+const BATTERY_CHARGE_RATE: f64 = 400.0;
 
 fn main() -> anyhow::Result<()> {
     let mut optimal_electricity_usage_plan = OptimizationPlan::new();
@@ -27,60 +27,52 @@ fn main() -> anyhow::Result<()> {
         let current_hour = hour;
         let current_electricity_price = get_electricity_price_for_an_hour(&hour).unwrap();
 
-         // the battery is at 50% at the start of the day
-        let mut current_battery_capacity: f64 = 0.5 * BATTERY_MAXIMUM_CAPACITY;
+        // the battery is at 50% at the start of the day
+        let mut current_battery_capacity: f64 = 0.5 * BATTERY_CAPACITY;
 
-        let energy_demand_for_current_hour = get_electricity_demand_for_an_hour(current_hour);
+        let energy_demand_for_current_hour = get_energy_demand_for_an_hour(current_hour);
 
         // go over the 15 minutes division for the current energy demand for the hour and apply the optimization rule
         for demand in energy_demand_for_current_hour.into_iter() {
             let energy_demand = demand.consumption_average_power_interval;
 
+            let overflow = ENERGY_CONTRACTUAL_LIMIT_FROM_GRID - energy_demand;
 
-            let energy_demand_has_overflow =
-                energy_demand > MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID;
+            let energy_demand_has_overflow = overflow < 0.0; // the overflow is a negative value
 
-            let overflow = MAXIMUM_ENERGY_CONTRACTUAL_LIMIT_FROM_GRID - energy_demand;
+            let high_tariff: bool = current_electricity_price > AVERAGE_ELECTRICITY_PRICE_IN_EURO;
 
-            println!("energy demand {} over flow {}", energy_demand, overflow);
-            let high_tariff: bool = current_electricity_price > AVERAGE_ELECTRICITY_PRICE_PER_EURO;
+            let battery_is_full = current_battery_capacity == BATTERY_CAPACITY;
 
-            let battery_is_full = current_battery_capacity == BATTERY_MAXIMUM_CAPACITY;
-
-            if energy_demand_has_overflow && overflow > current_battery_capacity {
+            if energy_demand_has_overflow && overflow.abs() > current_battery_capacity {
                 // eprintln!("Error: Battery cannot handle the current load overflow.");
-                std::process::exit(1);
-            } else if energy_demand_has_overflow && overflow < current_battery_capacity {
-                let time_spent_to_handle_the_excess_in_hrs = BATTERY_MAXIMUM_CAPACITY / overflow;
+            }
 
-                let battery_usage_duration_in_secs = time_spent_to_handle_the_excess_in_hrs as u64; //TODO: use standard conversion;
-                current_battery_capacity -= overflow;
+            if energy_demand_has_overflow && overflow.abs() < current_battery_capacity {
+                current_battery_capacity -= overflow.abs();
 
-                let battery_usage_plan = BatteryUsagePlan::new(
-                    Some(overflow),
-                    None,
-                    &demand.start,
-                    battery_usage_duration_in_secs,
-                );
+                let battery_usage_plan =
+                    BatteryUsagePlan::new(Some(overflow.abs()), None, &demand.start, &demand.end);
 
                 optimal_electricity_usage_plan.extend_plan_with(battery_usage_plan);
-                // run the load on the battery and calculate time needed
-            } else if !energy_demand_has_overflow && high_tariff {
+            }
+
+            if !energy_demand_has_overflow && high_tariff {
                 // eprintln!("Error: A vry high price can't charge the battery now ");
-                // high cost, skipping charging battery
-            } else if !high_tariff && !battery_is_full {
+            }
+
+            if !energy_demand_has_overflow && !high_tariff && !battery_is_full {
+                let available_energy = overflow;
+
                 // charge the battery
-                let time_spent_to_charge_the_battery_hrs = BATTERY_MAXIMUM_CAPACITY / overflow;
+                // if the available energy is greater than the battery charge rate, 400kw, the battery can only take 400kw
+                let energy_drawn = available_energy.min(BATTERY_CHARGE_RATE);
 
-                let battery_usage_duration_in_secs = time_spent_to_charge_the_battery_hrs as u64; //TODO: use standard conversion;
-                current_battery_capacity -= overflow;
-
-                let battery_usage_plan = BatteryUsagePlan::new(
-                    Some(overflow),
-                    None,
-                    &demand.start,
-                    battery_usage_duration_in_secs,
-                );
+                if battery_is_full {
+                    current_battery_capacity = BATTERY_CAPACITY;
+                }
+                let battery_usage_plan =
+                    BatteryUsagePlan::new(None, Some(energy_drawn), &demand.start, &demand.end);
 
                 optimal_electricity_usage_plan.extend_plan_with(battery_usage_plan);
             }
@@ -122,7 +114,7 @@ fn get_electricity_price_for_an_hour(hour: &u32) -> Option<f64> {
     electricity_price_per_hour.get(hour).copied()
 }
 
-fn get_electricity_demand_for_an_hour(current_hour: u32) -> Vec<EnergyConsumption> {
+fn get_energy_demand_for_an_hour(current_hour: u32) -> Vec<EnergyConsumption> {
     let energy_demand =
         parse_json::<EnergyConsumptionForecast>("energy_consumption_profile.json").unwrap();
 
@@ -137,7 +129,7 @@ fn get_electricity_demand_for_an_hour(current_hour: u32) -> Vec<EnergyConsumptio
         })
         .map(|profile| EnergyConsumption {
             consumption_average_power_interval: profile.consumption_average_power_interval
-                / 1000.0f64, // energy demand is converted to kw
+                / 1000.0f64, // energy demand is converted to kilowatt fro watt
             start: profile.start.clone(),
             end: profile.end.clone(),
         })
@@ -158,11 +150,9 @@ mod tests {
         country: String,
     }
 
-    // test the json_parser
-
     #[test]
-    fn test_json_parser() {
-        let parsed_data = parse_json::<Profile>("test.json").ok();
+    fn test_json_parser_function() {
+        let parsed_data = parse_json::<Profile>("json_parser_test.json").ok();
 
         let test_profile = Profile {
             name: "adeoye adefemi".to_string(),
@@ -172,8 +162,38 @@ mod tests {
         assert_eq!(Some(test_profile), parsed_data);
     }
 
-    // #[test]
-    // fn test_energy_demand_for_current_hour_function() {}
+    #[test]
+    fn test_get_energy_demand_for_current_hour_function() {
+        let energy_demand_for_23rd_hour = vec![
+            EnergyConsumption {
+                start: "2022-12-12T23:00:00Z".to_string(),
+                end: "2022-12-12T23:15:00Z".to_string(),
+                consumption_average_power_interval: 4656.0,
+            },
+            EnergyConsumption {
+                start: "2022-12-12T23:15:00Z".to_string(),
+                end: "2022-12-12T23:30:00Z".to_string(),
+                consumption_average_power_interval: 4528.0,
+            },
+            EnergyConsumption {
+                start: "2022-12-12T23:30:00Z".to_string(),
+                end: "2022-12-12T23:45:00Z".to_string(),
+                consumption_average_power_interval: 4464.0,
+            },
+            EnergyConsumption {
+                start: "2022-12-12T23:45:00Z".to_string(),
+                end: "2022-12-13T00:00:00Z".to_string(),
+                consumption_average_power_interval: 4560.0,
+            },
+        ];
+
+        for interval_demand in 0..=3 {
+            assert_eq!(
+                energy_demand_for_23rd_hour[interval_demand],
+                get_energy_demand_for_an_hour(23)[interval_demand]
+            )
+        }
+    }
 
     #[test]
     fn test_get_electricity_price_for_an_hour() {

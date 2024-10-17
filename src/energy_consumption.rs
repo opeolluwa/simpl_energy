@@ -19,7 +19,7 @@ impl Display for EnergyConsumptionForecast {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct EnergyConsumption {
     pub start: String,
     pub end: String,
